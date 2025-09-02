@@ -5,4 +5,4 @@ venv/
 .env
 
 # файлы для PyCharm
-.edea/
+.idea/

@@ -7,5 +7,5 @@ venv/
 # файлы для PyCharm
 .idea/
 
- __pycache__
+ __pycache__/
 bot.db

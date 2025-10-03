@@ -6,3 +6,6 @@ venv/
 
 # файлы для PyCharm
 .idea/
+
+ __pycache__
+bot.db

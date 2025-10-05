@@ -26,8 +26,8 @@ from datetime import datetime, date
 import telebot
 from telebot import types
 
-import db2 as db
-from config2 import TOKEN, DEFAULT_NOTIFY_HOUR
+import db
+from config import TOKEN, DEFAULT_NOTIFY_HOUR
 
 log = logging.getLogger(__name__)
 

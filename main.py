@@ -11,6 +11,9 @@ main.py — точка входа Telegram-бота (pyTelegramBotAPI / TeleBot)
   /note_count             — количество заметок
   /note_export            — выгрузка заметок в .txt
   /note_stats [days]      — статистика по датам (ASCII-гистограмма, по умолчанию 7 дней)
+  /models                 — список LLM моделей
+  /model <id>             — установить активную LLM модель
+  /ask <вопрос>           — задать вопрос LLM модели
 
 Замечания:
 - Параметризация SQL всегда через "?" (никаких f-строк для SQL).
@@ -29,6 +32,10 @@ from telebot import types
 from config import TOKEN
 import db
 
+from telebot import types
+from openrouter_client import chat_once, OpenRouterError
+from db import (get_active_model, list_models, set_active_model)
+
 log = logging.getLogger(__name__)
 
 # Создаём объект бота
@@ -36,6 +43,17 @@ bot = telebot.TeleBot(TOKEN)
 
 # Инициализируем БД при старте процесса
 db.init_db()
+
+def _build_messages(user_id: int, user_text: str) -> list[dict]:
+    system = (
+        f"Ты отвечаешь кратко и по-существу.\n"
+        "Правила:\n"
+        "1) Технические ответы давай корректно и по пунктам.\n"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_text},
+    ]
 
 # ---------------------------
 # Вспомогательные функции
@@ -81,6 +99,9 @@ def _setup_bot_commands() -> None:
         types.BotCommand("note_count", "Сколько заметок"),
         types.BotCommand("note_export", "Экспорт заметок в .txt"),
         types.BotCommand("note_stats", "Статистика по датам"),
+        types.BotCommand("model", "Установить активную модель"),
+        types.BotCommand("models", "Получить список моделей"),
+        types.BotCommand("ask", "Задать вопрос модели"),
     ]
     bot.set_my_commands(cmds)
 # Паттерн set_my_commands — см. Л2 (удобное меню команд в клиенте).  [oai_citation:17‡L2_Текст к лекции.pdf](file-service://file-6kQEVmhZuKhD1nBDo1XNnq)
@@ -106,6 +127,9 @@ def cmd_start(message: types.Message) -> None:
         "  /note_count\n"
         "  /note_export\n"
         "  /note_stats [days]\n"
+        "  /models \n"
+        "  /model <id>\n"
+        "  /ask <вопрос>\n"
     )
     bot.reply_to(message, text)
 
@@ -251,6 +275,62 @@ def cmd_note_stats(message: types.Message) -> None:
     bot.reply_to(message, "Последние дни:\n" + "\n".join(lines))
 # Группировка/визуализация — приём из Л3 (GROUP BY + ASCII-гистограмма).
 
+@bot.message_handler(commands=["models"])
+def cmd_models(message: types.Message) -> None:
+    """
+    Показать список LLM моделей
+    """
+    items = list_models()
+    if not items:
+        bot.reply_to(message, "Список моделей пуст.")
+        return
+    lines = ["Доступные модели:"]
+    for m in items:
+        star = "★" if m["active"] else " "
+        lines.append(f"{star} {m['id']}. {m['label']}  [{m['key']}]")
+    lines.append("\nАктивировать: /model <ID>")
+    bot.reply_to(message, "\n".join(lines))
+
+@bot.message_handler(commands=["model"])
+def cmd_model(message: types.Message) -> None:
+    """
+    Установить активной LLM модель
+    """
+    arg = message.text.replace("/model", "", 1).strip()
+    if not arg:
+        active = get_active_model()
+        bot.reply_to(message, f"Текущая активная модель: {active['label']} [{active['key']}]\n(сменить: /model <ID> или /models)")
+        return
+    if not arg.isdigit():
+        bot.reply_to(message, "Использование: /model <ID из /models>")
+        return
+    try:
+        active = set_active_model(int(arg))
+        bot.reply_to(message, f"Активная модель переключена: {active['label']} [{active['key']}]")
+    except ValueError:
+        bot.reply_to(message, "Неизвестный ID модели. Сначала /models.")
+
+@bot.message_handler(commands=["ask"])
+def cmd_ask(message: types.Message) -> None:
+    """
+    Задать вопрос LLM модели
+    """
+    q = message.text.replace("/ask", "", 1).strip()
+    if not q:
+        bot.reply_to(message, "Использование: /ask <вопрос>")
+        return
+
+    msgs = _build_messages(message.from_user.id, q[:600])
+    model_key = get_active_model()["key"]
+
+    try:
+        text, ms = chat_once(msgs, model=model_key, temperature=0.2, max_tokens=400)
+        out = (text or "").strip()[:4000]          # не переполняем сообщение Telegram
+        bot.reply_to(message, f"{out}\n\n({ms} мс; модель: {model_key})")
+    except OpenRouterError as e:
+        bot.reply_to(message, f"Ошибка: {e}")
+    except Exception:
+        bot.reply_to(message, "Непредвиденная ошибка.")
 
 # ---------------------------
 # Запуск long polling

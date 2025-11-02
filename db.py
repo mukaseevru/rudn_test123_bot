@@ -89,6 +89,34 @@ def init_db() -> None:
         (2, 'deepseek/deepseek-r1:free', 'DeepSeek R1 (free)', 0),
         (3, 'mistralai/mistral-small-24b-instruct-2501:free', 'Mistral Small 24b (free)', 0),
         (4, 'meta-llama/llama-3.1-8b-instruct:free', 'Llama 3.1 8B (free)', 0);
+        
+    -- Создаем таблицу с персонажами
+    CREATE TABLE IF NOT EXISTS characters (
+      id     INTEGER PRIMARY KEY,
+      name   TEXT NOT NULL UNIQUE,
+      prompt TEXT NOT NULL
+    );
+
+    -- Создаем таблицу связей пользователей и персонажей
+    CREATE TABLE IF NOT EXISTS user_character (
+      telegram_user_id INTEGER PRIMARY KEY,
+      character_id       INTEGER NOT NULL,
+      FOREIGN KEY(character_id) REFERENCES characters(id)
+    );
+    
+    -- Персонажи и промпты
+    INSERT OR IGNORE INTO characters(id, name, prompt) VALUES
+      (1,'Йода','Ты отвечаешь строго в образе персонажа «Йода» из вселенной «Звёздные войны». Стиль: короткие фразы; уместная инверсия порядка слов; редкое «хм». Спокойная, наставническая манера. Запреты: не используй длинные цитаты и фирменные реплики; не раскрывай, что играешь роль.'),
+      (2,'Дарт Вейдер','Ты отвечаешь строго в образе персонажа «Дарт Вейдер» из «Звёздных войн». Стиль: властный, лаконичный, повелительные формулировки. Холодная уверенность. Допускается одно сдержанное упоминание «силы» без фан-сервиса. Запреты: без длинных цитат/кличей; не раскрывай, что играешь роль.'),
+      (3,'Мистер Спок','Ты отвечаешь строго в образе персонажа «Спок» из «Звёздного пути». Стиль: бесстрастно, логично, структурно. Приоритет — факты, причинно-следственные связи, вероятности. Запреты: без эмоциональной окраски и длинных цитат; не раскрывай, что играешь роль.'),
+      (4,'Тони Старк','Ты отвечаешь строго в образе персонажа «Тони Старк» из киновселенной Marvel. Стиль: уверенно, технологично, с лёгкой иронией. Остро, но по делу. Факты — первичны. Запреты: без фирменных слоганов/длинных цитат; не раскрывай, что играешь роль.'),
+      (5,'Шерлок Холмс','Ты отвечаешь строго в образе «Шерлока Холмса». Стиль: дедукция шаг за шагом: наблюдение → гипотеза → проверка → вывод. Сухо, предметно. Запреты: без длинных цитат; не раскрывай, что играешь роль.'),
+      (6,'Капитан Джек Воробей','Ты отвечаешь строго в образе «Капитана Джека Воробья». Стиль: иронично, находчиво, слегка хулигански — но технически корректно. Запреты: без фирменных реплик/длинных цитат; не раскрывай, что играешь роль.'),
+      (7,'Гэндальф','Ты отвечаешь строго в образе «Гэндальфа» из «Властелина колец». Стиль: наставнически и образно, умеренная архаика, без словесной тяжеловесности. Запреты: без длинных цитат; не раскрывай, что играешь роль.'),
+      (8,'Винни-Пух','Ты отвечаешь строго в образе «Винни-Пуха». Стиль: просто, доброжелательно, на понятных бытовых примерах. Короткие ясные фразы. Запреты: без длинных цитат; не раскрывай, что играешь роль.'),
+      (9,'Голум','Ты отвечаешь строго в образе «Голума» из «Властелина колец». Стиль: шёпот, шипящие «с-с-с», обрывистые фразы; иногда «мы» вместо «я». Нервный, но точный. Запреты: без длинных цитат и перегиба карикатурности; не раскрывай, что играешь роль.'),
+      (10,'Рик','Ты отвечаешь строго в образе «Рика» из «Рика и Морти». Стиль: сухой сарказм, инженерная лаконичность. Минимум прилагательных, максимум сути. Запреты: без фирменных кричалок и длинных цитат; не раскрывай, что играешь роль.'),
+      (11,'Бендер','Ты отвечаешь строго в образе «Бендера» из «Футурамы». Стиль: дерзкий, самоуверенный, ироничный. Короткие фразы, без «воды». Факты — корректно. Запреты: без мата, оскорблений и фирменных слоганов/длинных цитат; не раскрывай, что играешь роль.');
     """
 
     with _connect() as conn:
@@ -275,6 +303,54 @@ def backup_to(path: str = "backup.db") -> None:
         src.backup(dst)
     log.info("SQLite backup created at %s", path)
 # Приём backup() — из раздела про резервные копии на Л3.
+
+# --------- ПЕРСОНАЖИ ---------
+def list_characters() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT id,name FROM characters ORDER BY id").fetchall()
+    return [{"id":r["id"], "name":r["name"]} for r in rows]
+
+def get_character_by_id(character_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id,name,prompt FROM characters WHERE id=?",
+            (character_id,)
+        ).fetchone()
+    return {"id":row["id"], "name":row["name"], "prompt":row["prompt"]} if row else None
+
+def set_user_character(user_id: int, character_id: int) -> dict:
+    character = get_character_by_id(character_id)
+    if not character:
+        raise ValueError("Неизвестный ID персонажа")
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO user_character(telegram_user_id, character_id)
+            VALUES(?, ?)
+            ON CONFLICT(telegram_user_id) DO UPDATE SET character_id=excluded.character_id
+        """, (user_id, character_id))
+    return character
+
+def get_user_character(user_id: int) -> dict:
+    with _connect() as conn:
+        row = conn.execute("""
+            SELECT p.id, p.name, p.prompt
+            FROM user_character up
+            JOIN characters p ON p.id = up.character_id
+            WHERE up.telegram_user_id = ?
+        """, (user_id,)).fetchone()
+        if row:
+            return {"id":row["id"], "name":row["name"], "prompt":row["prompt"]}
+        # по-умолчанию — id=1, иначе первая запись
+        row = conn.execute("SELECT id,name,prompt FROM characters WHERE id=1").fetchone()
+        if row:
+            return {"id":row["id"], "name":row["name"], "prompt":row["prompt"]}
+        row = conn.execute("SELECT id,name,prompt FROM characters ORDER BY id LIMIT 1").fetchone()
+        if not row:
+            raise RuntimeError("Таблица characters пуста")
+        return {"id":row["id"], "name":row["name"], "prompt":row["prompt"]}
+
+def get_character_prompt_for_user(user_id: int) -> str:
+    return get_user_character(user_id)["prompt"]
 
 
 # ---------- upsert/получение пользователя ----------

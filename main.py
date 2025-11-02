@@ -14,6 +14,11 @@ main.py — точка входа Telegram-бота (pyTelegramBotAPI / TeleBot)
   /models                 — список LLM моделей
   /model <id>             — установить активную LLM модель
   /ask <вопрос>           — задать вопрос LLM модели
+  /ask_random <вопрос>    — задать вопрос случайной LLM модели
+  /characters             — список персонажей
+  /character <id>         — установить активного персонажа
+  /whoami                 — активная модель и активный персонаж
+
 
 Замечания:
 - Параметризация SQL всегда через "?" (никаких f-строк для SQL).
@@ -26,6 +31,8 @@ import os
 import logging
 from typing import Iterable
 
+import random
+
 import telebot
 from telebot import types
 
@@ -34,7 +41,7 @@ import db
 
 from telebot import types
 from openrouter_client import chat_once, OpenRouterError
-from db import (get_active_model, list_models, set_active_model)
+from db import (get_active_model, list_models, set_active_model, list_characters, get_user_character, set_user_character, get_character_by_id)
 
 log = logging.getLogger(__name__)
 
@@ -45,10 +52,32 @@ bot = telebot.TeleBot(TOKEN)
 db.init_db()
 
 def _build_messages(user_id: int, user_text: str) -> list[dict]:
+    p = get_user_character(user_id)
     system = (
-        f"Ты отвечаешь кратко и по-существу.\n"
+        f"Ты отвечаешь строго в образе персонажа: {p['name']}.\n"
+        f"{p['prompt']}\n"
         "Правила:\n"
-        "1) Технические ответы давай корректно и по пунктам.\n"
+        "1) Всегда держи стиль и манеру речи выбранного персонажа. При необходимости — переформулируй.\n"
+        "2) Технические ответы давай корректно и по пунктам, но в характерной манере.\n"
+        "3) Не раскрывай, что ты 'играешь роль'.\n"
+        "4) Не используй длинные дословные цитаты из фильмов/книг (>10 слов).\n"
+        "5) Если стиль персонажа выражен слабо — переформулируй ответ и усили характер персонажа, сохраняя фактическую точность.\n"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_text},
+    ]
+
+def _build_messages_for_character(character: dict, user_text: str) -> list[dict]:
+    system = (
+        f"Ты отвечаешь строго в образе персонажа: {character['name']}.\n"
+        f"{character['prompt']}\n"
+        "Правила:\n"
+        "1) Всегда держи стиль и манеру речи выбранного персонажа. При необходимости — переформулируй.\n"
+        "2) Технические ответы давай корректно и по пунктам, но в характерной манере.\n"
+        "3) Не раскрывай, что ты 'играешь роль'.\n"
+        "4) Не используй длинные дословные цитаты из фильмов/книг (>10 слов).\n"
+        "5) Если стиль персонажа выражен слабо — переформулируй ответ и усили характер персонажа, сохраняя фактическую точность.\n"
     )
     return [
         {"role": "system", "content": system},
@@ -102,6 +131,10 @@ def _setup_bot_commands() -> None:
         types.BotCommand("model", "Установить активную модель"),
         types.BotCommand("models", "Получить список моделей"),
         types.BotCommand("ask", "Задать вопрос модели"),
+        types.BotCommand("ask_random", "Задать вопрос случайной модели"),
+        types.BotCommand("character", "Установить активного персонажа"),
+        types.BotCommand("characters", "Получить список персонажей"),
+        types.BotCommand("whoami", "Получить активную модель и активного персонажа"),
     ]
     bot.set_my_commands(cmds)
 # Паттерн set_my_commands — см. Л2 (удобное меню команд в клиенте).  [oai_citation:17‡L2_Текст к лекции.pdf](file-service://file-6kQEVmhZuKhD1nBDo1XNnq)
@@ -130,6 +163,10 @@ def cmd_start(message: types.Message) -> None:
         "  /models \n"
         "  /model <id>\n"
         "  /ask <вопрос>\n"
+        "  /ask_random <вопрос>\n"
+        "  /characters \n"
+        "  /character <id>\n"
+        "  /whoami \n"
     )
     bot.reply_to(message, text)
 
@@ -331,6 +368,90 @@ def cmd_ask(message: types.Message) -> None:
         bot.reply_to(message, f"Ошибка: {e}")
     except Exception:
         bot.reply_to(message, "Непредвиденная ошибка.")
+
+@bot.message_handler(commands=["ask_random"])
+def cmd_ask_random(message: types.Message) -> None:
+    """
+    Задать вопрос случайной LLM модели
+    """
+    q = message.text.replace("/ask_random", "", 1).strip()
+    if not q:
+        bot.reply_to(message, "Использование: /ask_random <вопрос>")
+        return
+    q = q[:600]
+
+    # Берём случайного персонажа из таблицы (НЕ сохраняем в user_character)
+    items = list_characters()
+    if not items:
+        bot.reply_to(message, "Каталог персонажей пуст.")
+        return
+    chosen = random.choice(items)
+    character = get_character_by_id(chosen["id"])  # получаем prompt
+
+    msgs = _build_messages_for_character(character, q)
+    model_key = get_active_model()["key"]
+
+    try:
+        text, ms = chat_once(msgs, model=model_key, temperature=0.2, max_tokens=400)
+        out = (text or "").strip()[:4000]
+        bot.reply_to(message, f"{out}\n\n({ms} мс; модель: {model_key}; как: {character['name']})")
+    except OpenRouterError as e:
+        bot.reply_to(message, f"Ошибка: {e}")
+    except Exception:
+        bot.reply_to(message, "Непредвиденная ошибка.")
+
+@bot.message_handler(commands=["characters"])
+def cmd_characters(message: types.Message) -> None:
+    """
+    Показать список персонажей
+    """
+    user_id = message.from_user.id
+    items = list_characters()
+    if not items:
+        bot.reply_to(message, "Каталог персонажей пуст.")
+        return
+
+    # Текущий персонаж пользователя
+    try:
+        current = get_user_character(user_id)["id"]
+    except Exception:
+        current = None
+
+    lines = ["Доступные персонажи:"]
+    for p in items:
+        star = "★" if current is not None and p["id"] == current else " "
+        lines.append(f"{star} {p['id']}. {p['name']}")
+    lines.append("\nВыбор: /character <ID>")
+    bot.reply_to(message, "\n".join(lines))
+
+@bot.message_handler(commands=["character"])
+def cmd_character(message: types.Message) -> None:
+    """
+    Установить активным персонажа
+    """
+    user_id = message.from_user.id
+    arg = message.text.replace("/character", "", 1).strip()
+    if not arg:
+        p = get_user_character(user_id)
+        bot.reply_to(message, f"Текущий персонаж: {p['name']}\n(сменить: /characters, затем /character <ID>)")
+        return
+    if not arg.isdigit():
+        bot.reply_to(message, "Использование: /character <ID из /characters>")
+        return
+    try:
+        p = set_user_character(user_id, int(arg))
+        bot.reply_to(message, f"Персонаж установлен: {p['name']}")
+    except ValueError:
+        bot.reply_to(message, "Неизвестный ID персонажа. Сначала /characters.")
+
+@bot.message_handler(commands=["whoami"])
+def cmd_whoami(message: types.Message) -> None:
+    """
+    Показать активную модель и активного персонажа
+    """
+    character = get_user_character(message.from_user.id)
+    model = get_active_model()
+    bot.reply_to(message, f"Модель: {model['label']} [{model['key']}]\nПерсонаж: {character['name']}")
 
 # ---------------------------
 # Запуск long polling

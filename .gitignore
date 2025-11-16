@@ -9,3 +9,7 @@ venv/
 
 __pycache__/
 bot.db
+
+# tests
+.coverage
+/htmlcov

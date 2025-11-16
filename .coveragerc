@@ -1,0 +1,21 @@
+[run]
+branch = True
+source =
+    db
+    openrouter_client
+    main
+omit =
+    tests/*
+    */venv/*
+    main_DailyZodiakBot.py
+    conftest.py
+    config.py
+    cleanup_coverage.py
+
+[report]
+show_missing = True
+skip_covered = False
+precision = 1
+
+[html]
+directory = htmlcov

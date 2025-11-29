@@ -13,3 +13,6 @@ bot.db
 # tests
 .coverage
 /htmlcov
+
+# Логи
+logs

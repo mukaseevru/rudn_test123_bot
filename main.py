@@ -18,6 +18,7 @@ main.py — точка входа Telegram-бота (pyTelegramBotAPI / TeleBot)
   /characters             — список персонажей
   /character <id>         — установить активного персонажа
   /whoami                 — активная модель и активный персонаж
+  /stats                  — мониторинг бота
 
 
 Замечания:
@@ -41,9 +42,16 @@ import db
 
 from telebot import types
 from openrouter_client import chat_once, OpenRouterError
-from db import (get_active_model, list_models, set_active_model, list_characters, get_user_character, set_user_character, get_character_by_id)
+from db import (get_active_model, list_models, set_active_model, list_characters, get_user_character, set_user_character, get_character_by_id, write_error_log)
 
+from logging_config import setup_logging
+from metrics import metric, timed
+
+# Настраиваем логирование до того, как делаем что-либо еще
+setup_logging()
 log = logging.getLogger(__name__)
+
+log.info("Старт приложения (инициализация бота)")
 
 # Создаём объект бота
 bot = telebot.TeleBot(TOKEN)
@@ -51,6 +59,7 @@ bot = telebot.TeleBot(TOKEN)
 # Инициализируем БД при старте процесса
 db.init_db()
 
+@timed("build_messages_ms", logger=log)
 def _build_messages(user_id: int, user_text: str) -> list[dict]:
     p = get_user_character(user_id)
     system = (
@@ -135,6 +144,7 @@ def _setup_bot_commands() -> None:
         types.BotCommand("character", "Установить активного персонажа"),
         types.BotCommand("characters", "Получить список персонажей"),
         types.BotCommand("whoami", "Получить активную модель и активного персонажа"),
+        types.BotCommand("stats", "Мониторинг бота"),
     ]
     bot.set_my_commands(cmds)
 # Паттерн set_my_commands — см. Л2 (удобное меню команд в клиенте).  [oai_citation:17‡L2_Текст к лекции.pdf](file-service://file-6kQEVmhZuKhD1nBDo1XNnq)
@@ -149,6 +159,7 @@ def cmd_start(message: types.Message) -> None:
     """
     Поприветствовать пользователя и кратко описать команды.
     """
+    log.debug("Запущена команда /start")
     text = (
         "Привет! Это заметочник на SQLite.\n\n"
         "Команды:\n"
@@ -168,6 +179,7 @@ def cmd_start(message: types.Message) -> None:
         "  /character <id>\n"
         "  /whoami \n"
     )
+    log.debug(f"Команда start вернула текст:\n{text}")
     bot.reply_to(message, text)
 
 
@@ -176,6 +188,8 @@ def cmd_note_add(message: types.Message) -> None:
     """
     Добавить новую заметку: /note_add купить хлеб
     """
+    metric.counter("commands_total").inc()
+    metric.counter("note_add_requests_total").inc()
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         bot.reply_to(message, "Формат: /note_add <текст заметки>")
@@ -196,6 +210,8 @@ def cmd_note_list(message: types.Message) -> None:
     Показать последние N заметок: /note_list [N]
     """
     # Опциональный аргумент лимита
+    metric.counter("commands_total").inc()
+    metric.counter("note_list_requests_total").inc()
     parts = message.text.split(maxsplit=1)
     limit = _parse_int(parts[1]) if len(parts) == 2 else 10
 
@@ -208,6 +224,8 @@ def cmd_note_find(message: types.Message) -> None:
     """
     Поиск заметок по подстроке: /note_find хлеб
     """
+    metric.counter("commands_total").inc()
+    metric.counter("note_find_requests_total").inc()
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         bot.reply_to(message, "Формат: /note_find <подстрока>")
@@ -226,6 +244,8 @@ def cmd_note_edit(message: types.Message) -> None:
     """
     Изменить текст заметки: /note_edit 12 купить молоко
     """
+    metric.counter("commands_total").inc()
+    metric.counter("note_edit_requests_total").inc()
     parts = message.text.split(maxsplit=2)
     if len(parts) < 3:
         bot.reply_to(message, "Формат: /note_edit <id> <новый текст>")
@@ -246,6 +266,8 @@ def cmd_note_del(message: types.Message) -> None:
     """
     Удалить заметку: /note_del 12
     """
+    metric.counter("commands_total").inc()
+    metric.counter("note_del_requests_total").inc()
     parts = message.text.split(maxsplit=1)
     note_id = _parse_int(parts[1]) if len(parts) == 2 else None
     if not note_id:
@@ -261,6 +283,8 @@ def cmd_note_count(message: types.Message) -> None:
     """
     Количество заметок пользователя.
     """
+    metric.counter("commands_total").inc()
+    metric.counter("note_count_requests_total").inc()
     total = db.count_notes(message.from_user.id)
     bot.reply_to(message, f"У вас {total} заметок.")
 
@@ -270,6 +294,8 @@ def cmd_note_export(message: types.Message) -> None:
     """
     Экспорт заметок пользователя в текстовый файл и отправка как документ.
     """
+    metric.counter("commands_total").inc()
+    metric.counter("note_export_requests_total").inc()
     rows = db.list_notes(message.from_user.id, limit=1000)
     if not rows:
         bot.reply_to(message, "Экспортировать нечего — заметок нет.")
@@ -299,6 +325,8 @@ def cmd_note_stats(message: types.Message) -> None:
     ASCII-гистограмма: сколько заметок по дням.
     Пример: /note_stats 7
     """
+    metric.counter("commands_total").inc()
+    metric.counter("note_stats_requests_total").inc()
     parts = message.text.split(maxsplit=1)
     days = _parse_int(parts[1]) if len(parts) == 2 else 7
     days = days if (days and days > 0) else 7
@@ -317,6 +345,8 @@ def cmd_models(message: types.Message) -> None:
     """
     Показать список LLM моделей
     """
+    metric.counter("commands_total").inc()
+    metric.counter("models_requests_total").inc()
     items = list_models()
     if not items:
         bot.reply_to(message, "Список моделей пуст.")
@@ -333,6 +363,8 @@ def cmd_model(message: types.Message) -> None:
     """
     Установить активной LLM модель
     """
+    metric.counter("commands_total").inc()
+    metric.counter("model_requests_total").inc()
     arg = message.text.replace("/model", "", 1).strip()
     if not arg:
         active = get_active_model()
@@ -352,28 +384,62 @@ def cmd_ask(message: types.Message) -> None:
     """
     Задать вопрос LLM модели
     """
+    metric.counter("commands_total").inc()
+    metric.counter("ask_requests_total").inc()
+
+    user_id = message.from_user.id
     q = message.text.replace("/ask", "", 1).strip()
     if not q:
         bot.reply_to(message, "Использование: /ask <вопрос>")
         return
 
-    msgs = _build_messages(message.from_user.id, q[:600])
+    msgs = _build_messages(user_id, q[:600])
     model_key = get_active_model()["key"]
+
+    log.info("Команда /ask от user_id=%s, вопрос=%.80s", user_id, q)
 
     try:
         text, ms = chat_once(msgs, model=model_key, temperature=0.2, max_tokens=400)
-        out = (text or "").strip()[:4000]          # не переполняем сообщение Telegram
-        bot.reply_to(message, f"{out}\n\n({ms} мс; модель: {model_key})")
+
     except OpenRouterError as e:
+        metric.counter("openrouter_errors_total").inc()
+
+        log.error("OpenRouterError при /ask от user_id=%s: %s", user_id, e)
+        write_error_log(
+            level="ERROR",
+            logger_name=__name__,
+            message=str(e),
+            user_id=user_id,
+            command="/ask",
+            details=None,
+        )
         bot.reply_to(message, f"Ошибка: {e}")
+        return
     except Exception:
+        log.exception("Непредвиденная ошибка при /ask от user_id=%s", user_id)
+        write_error_log(
+            level="ERROR",
+            logger_name=__name__,
+            message=f"Unhandled error in /ask: {e}",
+            user_id=user_id,
+            command="/ask",
+            details=None,
+        )
         bot.reply_to(message, "Непредвиденная ошибка.")
+        return
+
+    metric.latency("openrouter_latency_ms").observe(ms)
+
+    out = (text or "").strip()[:4000]  # не переполняем сообщение Telegram
+    bot.reply_to(message, f"{out}\n\n({ms} мс; модель: {model_key})")
 
 @bot.message_handler(commands=["ask_random"])
 def cmd_ask_random(message: types.Message) -> None:
     """
     Задать вопрос случайной LLM модели
     """
+    metric.counter("commands_total").inc()
+    metric.counter("ask_random_requests_total").inc()
     q = message.text.replace("/ask_random", "", 1).strip()
     if not q:
         bot.reply_to(message, "Использование: /ask_random <вопрос>")
@@ -405,6 +471,8 @@ def cmd_characters(message: types.Message) -> None:
     """
     Показать список персонажей
     """
+    metric.counter("commands_total").inc()
+    metric.counter("characters_requests_total").inc()
     user_id = message.from_user.id
     items = list_characters()
     if not items:
@@ -429,6 +497,8 @@ def cmd_character(message: types.Message) -> None:
     """
     Установить активным персонажа
     """
+    metric.counter("commands_total").inc()
+    metric.counter("character_requests_total").inc()
     user_id = message.from_user.id
     arg = message.text.replace("/character", "", 1).strip()
     if not arg:
@@ -449,9 +519,52 @@ def cmd_whoami(message: types.Message) -> None:
     """
     Показать активную модель и активного персонажа
     """
+    metric.counter("commands_total").inc()
+    metric.counter("whoami_requests_total").inc()
     character = get_user_character(message.from_user.id)
     model = get_active_model()
     bot.reply_to(message, f"Модель: {model['label']} [{model['key']}]\nПерсонаж: {character['name']}")
+
+@bot.message_handler(commands=["stats"])
+def handle_stats(message: types.Message) -> None:
+    """
+    Показать все накопленные метрики:
+    - все счетчики из metric.counter(...);
+    - все latency-метрики
+    """
+    user_id = message.from_user.id
+    metric.counter("commands_total").inc()
+    log.info("Команда /stats от user_id=%s", user_id)
+
+    stats = metric.snapshot()
+    counters = stats["counters"]
+    latencies = stats["latencies"]
+
+    lines: list[str] = []
+    lines.append("Статистика бота\n")
+
+    # Счетчики
+    lines.append("Счетчики:")
+    if counters:
+        for name, value in sorted(counters.items()):
+            lines.append(f"- {name}: {value}")
+    else:
+        lines.append("- нет данных")
+
+    # Замеры времени
+    lines.append("\nЗамеры времени (мс):")
+    if latencies:
+        for name, data in sorted(latencies.items()):
+            lines.append(
+                f"- {name}: count={data['count']}, "
+                f"avg={data['avg_ms']:.0f}, "
+                f"min={data['min_ms']}, max={data['max_ms']}"
+            )
+    else:
+        lines.append("- нет данных")
+
+    bot.reply_to(message, "\n".join(lines))
+
 
 # ---------------------------
 # Запуск long polling

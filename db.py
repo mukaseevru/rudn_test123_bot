@@ -13,6 +13,8 @@ db.py — слой доступа к данным (SQLite через sqlite3, б
 """
 
 from __future__ import annotations
+from datetime import datetime
+from typing import Optional
 
 import sqlite3
 import logging
@@ -117,6 +119,30 @@ def init_db() -> None:
       (9,'Голум','Ты отвечаешь строго в образе «Голума» из «Властелина колец». Стиль: шёпот, шипящие «с-с-с», обрывистые фразы; иногда «мы» вместо «я». Нервный, но точный. Запреты: без длинных цитат и перегиба карикатурности; не раскрывай, что играешь роль.'),
       (10,'Рик','Ты отвечаешь строго в образе «Рика» из «Рика и Морти». Стиль: сухой сарказм, инженерная лаконичность. Минимум прилагательных, максимум сути. Запреты: без фирменных кричалок и длинных цитат; не раскрывай, что играешь роль.'),
       (11,'Бендер','Ты отвечаешь строго в образе «Бендера» из «Футурамы». Стиль: дерзкий, самоуверенный, ироничный. Короткие фразы, без «воды». Факты — корректно. Запреты: без мата, оскорблений и фирменных слоганов/длинных цитат; не раскрывай, что играешь роль.');
+      
+    -- Журнал вызовов внешних сервисов (OpenRouter и т.п.)  
+    CREATE TABLE IF NOT EXISTS service_call_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,      -- время создания записи
+      service TEXT NOT NULL,         -- имя сервиса, напр. 'openrouter'
+      request TEXT NOT NULL,         -- строка запроса
+      response TEXT,                 -- строка ответа 
+      status_code INTEGER,           -- HTTP статус
+      duration_ms INTEGER,           -- длительность вызова в миллисекундах
+      error TEXT                     -- текст ошибки
+    );
+    
+    -- Журнал ошибок
+    CREATE TABLE IF NOT EXISTS error_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,    -- время создания записи
+        level TEXT NOT NULL,         -- уровень ошибки
+        logger TEXT NOT NULL,        -- имя модуля где произошла ошибка
+        message TEXT NOT NULL,       -- текстовое описание ошибки
+        user_id INTEGER,             -- ID пользователя
+        command TEXT,                -- команда, во время которой произошла ошибка
+        details TEXT                 -- доп.детали
+    );
     """
 
     with _connect() as conn:
@@ -406,3 +432,84 @@ def list_due_users(today_str: str, hour: int) -> list[sqlite3.Row]:
 def mark_sent_today(user_id: int, today_str: str) -> None:
     with _connect() as conn:
         conn.execute("UPDATE users SET last_sent_date = ? WHERE user_id = ?", (today_str, user_id))
+
+def write_service_call(
+    service: str,
+    request: str,
+    response: Optional[str],
+    status_code: Optional[int],
+    duration_ms: Optional[int],
+    error: Optional[str] = None,
+) -> None:
+    """
+    Записать информацию о вызове внешнего сервиса в service_call_log.
+
+    service      — имя сервиса, например 'openrouter'
+    request      — строковое представление запроса
+    response     — строка ответа (может быть None)
+    status_code  — HTTP статус, если есть
+    duration_ms  — длительность вызова в мс
+    error        — текст ошибки, если вызов завершился неуспешно
+    """
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO service_call_log
+                (created_at, service, request, response, status_code, duration_ms, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.utcnow().isoformat(timespec="seconds"),
+                service,
+                request,
+                response,
+                status_code,
+                duration_ms,
+                error,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.error("Не удалось записать запись в service_call_log: %s", e, exc_info=True)
+
+def write_error_log(
+    level: str,
+    logger_name: str,
+    message: str,
+    user_id: Optional[int] = None,
+    command: Optional[str] = None,
+    details: Optional[str] = None,
+) -> None:
+    """
+    Записать одну строку в таблицу error_log.
+
+    Используем для важных ошибок:
+    - OpenRouterError (401/429/5xx),
+    - серьезные ошибки БД,
+    - падения хендлеров
+    """
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO error_log (created_at, level, logger, message, user_id, command, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.utcnow().isoformat(timespec="seconds"),
+                level,
+                logger_name,
+                message,
+                user_id,
+                command,
+                details,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.error("Не удалось записать ошибку в error_log: %s", e, exc_info=True)

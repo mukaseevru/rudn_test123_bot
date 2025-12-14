@@ -143,6 +143,18 @@ def init_db() -> None:
         command TEXT,                -- команда, во время которой произошла ошибка
         details TEXT                 -- доп.детали
     );
+    
+    -- Динамические параметры
+    CREATE TABLE IF NOT EXISTS settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    
+    -- Feature Toggles
+    CREATE TABLE IF NOT EXISTS feature_toggles (
+		name    TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+	);
     """
 
     with _connect() as conn:
@@ -513,3 +525,85 @@ def write_error_log(
         conn.close()
     except Exception as e:
         log.error("Не удалось записать ошибку в error_log: %s", e, exc_info=True)
+
+
+def get_setting_or_default(key: str, default: str) -> str:
+    """
+    Вернуть динамический параметр по ключу.
+    Если параметра нет — вернуть default.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+    if row is None:
+        return default
+    return row["value"]
+
+
+def get_int_setting(key: str, default: int) -> int:
+    """
+    Вернуть динамический параметр по ключу в виде int.
+    """
+    raw = get_setting_or_default(key, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def get_bool_setting(key: str, default: bool) -> bool:
+    """
+    Вернуть динамический параметр по ключу в виде bool.
+    """
+    raw = get_setting_or_default(key, "true" if default else "false")
+    raw_low = raw.lower()
+    if raw_low in ("1", "true", "yes", "on"):
+        return True
+    if raw_low in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def is_feature_enabled(name: str, default: bool) -> bool:
+    """
+    Вернуть состояние фиче-тоггла по имени.
+    Если записи нет — вернуть default.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT enabled FROM feature_toggles WHERE name = ?",
+            (name,),
+        ).fetchone()
+    if row is None:
+        return default
+    return bool(row["enabled"])
+
+
+def set_setting(key: str, value: str) -> None:
+    """
+    Установить динамический параметр
+    """
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def set_feature_toggle(name: str, enabled: bool) -> None:
+    """
+    Установить фиче-тоггл (enabled = 0/1).
+    """
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO feature_toggles (name, enabled)
+            VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET enabled = excluded.enabled
+            """,
+            (name, 1 if enabled else 0),
+        )
+

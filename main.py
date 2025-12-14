@@ -37,12 +37,12 @@ import random
 import telebot
 from telebot import types
 
-from config import TOKEN
+from config import TOKEN, MAX_PROMPT_CHARS_DEFAULT, SHOW_MODEL_FOOTER_DEFAULT, DEBUG_SETTINGS_SHOW, CMD_MODEL_ID_ENABLED
 import db
 
 from telebot import types
 from openrouter_client import chat_once, OpenRouterError
-from db import (get_active_model, list_models, set_active_model, list_characters, get_user_character, set_user_character, get_character_by_id, write_error_log)
+from db import (get_active_model, list_models, set_active_model, list_characters, get_user_character, set_user_character, get_character_by_id, write_error_log, get_int_setting, get_bool_setting, is_feature_enabled, set_setting, set_feature_toggle)
 
 from logging_config import setup_logging
 from metrics import metric, timed
@@ -146,6 +146,9 @@ def _setup_bot_commands() -> None:
         types.BotCommand("whoami", "Получить активную модель и активного персонажа"),
         types.BotCommand("stats", "Мониторинг бота"),
     ]
+    if is_feature_enabled("debug_settings", DEBUG_SETTINGS_SHOW):
+        cmds.append(types.BotCommand("debug_settings", "Показать настройки бота"))
+
     bot.set_my_commands(cmds)
 # Паттерн set_my_commands — см. Л2 (удобное меню команд в клиенте).  [oai_citation:17‡L2_Текст к лекции.pdf](file-service://file-6kQEVmhZuKhD1nBDo1XNnq)
 
@@ -363,6 +366,10 @@ def cmd_model(message: types.Message) -> None:
     """
     Установить активной LLM модель
     """
+    if not is_feature_enabled("cmd_model_id", CMD_MODEL_ID_ENABLED):
+        bot.reply_to(message, "Команды выбора модели временно отключены.")
+        return
+
     metric.counter("commands_total").inc()
     metric.counter("model_requests_total").inc()
     arg = message.text.replace("/model", "", 1).strip()
@@ -393,7 +400,9 @@ def cmd_ask(message: types.Message) -> None:
         bot.reply_to(message, "Использование: /ask <вопрос>")
         return
 
-    msgs = _build_messages(user_id, q[:600])
+    max_len = get_int_setting("max_prompt_chars", MAX_PROMPT_CHARS_DEFAULT)
+
+    msgs = _build_messages(user_id, q[:max_len])
     model_key = get_active_model()["key"]
 
     log.info("Команда /ask от user_id=%s, вопрос=%.80s", user_id, q)
@@ -415,7 +424,7 @@ def cmd_ask(message: types.Message) -> None:
         )
         bot.reply_to(message, f"Ошибка: {e}")
         return
-    except Exception:
+    except Exception as e:
         log.exception("Непредвиденная ошибка при /ask от user_id=%s", user_id)
         write_error_log(
             level="ERROR",
@@ -431,7 +440,10 @@ def cmd_ask(message: types.Message) -> None:
     metric.latency("openrouter_latency_ms").observe(ms)
 
     out = (text or "").strip()[:4000]  # не переполняем сообщение Telegram
-    bot.reply_to(message, f"{out}\n\n({ms} мс; модель: {model_key})")
+
+    show_footer = get_bool_setting("show_model_footer", SHOW_MODEL_FOOTER_DEFAULT)
+    add_info = f"\n\n({ms} мс; модель: {model_key})" if show_footer else ""
+    bot.reply_to(message, f"{out}{add_info}")
 
 @bot.message_handler(commands=["ask_random"])
 def cmd_ask_random(message: types.Message) -> None:
@@ -564,6 +576,85 @@ def handle_stats(message: types.Message) -> None:
         lines.append("- нет данных")
 
     bot.reply_to(message, "\n".join(lines))
+
+
+@bot.message_handler(commands=["debug_settings"])
+def cmd_debug_settings(message):
+    """
+    Показывает настройки, если фиче-тоггл debug_settings включен.
+    Иначе сообщает, что команда отключена.
+    """
+    max_len = get_int_setting("max_prompt_chars", MAX_PROMPT_CHARS_DEFAULT)
+    show_footer = get_bool_setting("show_model_footer", SHOW_MODEL_FOOTER_DEFAULT)
+    model_cmds = is_feature_enabled("cmd_model_id", CMD_MODEL_ID_ENABLED)
+
+    text = (
+        f"max_prompt_chars = {max_len}\n"
+        f"show_model_footer = {show_footer}\n"
+        f"feature: cmd_model_id = {model_cmds}\n"
+    )
+    bot.reply_to(message, text)
+
+
+@bot.message_handler(commands=["set_setting"])
+def cmd_set_setting(message: types.Message) -> None:
+    """
+    Админ-команда: установить динамический параметр в таблице settings.
+
+    Формат:
+      /set_setting ключ=значение
+
+    Примеры:
+      /set_setting max_prompt_chars=300
+      /set_setting show_model_footer=false
+    """
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or "=" not in parts[1]:
+        bot.reply_to(message, "Использование: /set_setting ключ=значение")
+        return
+
+    key, value = parts[1].split("=", 1)
+    key = key.strip()
+    value = value.strip()
+
+    if not key:
+        bot.reply_to(message, "Ключ параметра не может быть пустым.")
+        return
+
+    set_setting(key, value)
+    bot.reply_to(message, f"Параметр {key} установлен в {value}")
+
+
+@bot.message_handler(commands=["set_toggle"])
+def cmd_set_toggle(message: types.Message) -> None:
+    """
+    Админ-команда: включить/выключить фиче-тоггл в таблице feature_toggles.
+
+    Формат:
+      /set_toggle имя on|off
+
+    Примеры:
+      /set_toggle debug_settings on
+      /set_toggle cmd_model_id off
+    """
+
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        bot.reply_to(message, "Использование: /set_toggle имя on|off")
+        return
+
+    name = parts[1].strip()
+    state = parts[2].strip().lower()
+
+    if state not in ("on", "off"):
+        bot.reply_to(message, "Второй аргумент должен быть on или off.")
+        return
+
+    enabled = state == "on"
+    set_feature_toggle(name, enabled)
+    bot.reply_to(message, f"Feature-toggle {name} = {enabled}")
+
 
 
 # ---------------------------
